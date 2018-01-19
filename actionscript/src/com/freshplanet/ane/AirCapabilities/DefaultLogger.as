@@ -42,7 +42,7 @@ package com.freshplanet.ane.AirCapabilities {
 			log("[AirCapabilities] [Error]", tag, params);
 		}
 		
-		private function log(type:String, tag:String, params):void {
+		private function log(type:String, tag:String, params:Object):void {
 			var str:String = "[AirCapabilities]" + type + "[" + tag + "]";
 			if(params.length) {
 				str += ": " + params.join(" - ");

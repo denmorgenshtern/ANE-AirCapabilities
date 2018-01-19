@@ -1,31 +1,64 @@
-/*
- * Copyright 2017 FreshPlanet
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-#import <Foundation/Foundation.h>
-#import <MessageUI/MFMessageComposeViewController.h>
-#import <StoreKit/StoreKit.h>
-#import "FPANEUtils.h"
+//
+//  AirCapabilities.h
+//  AirCapabilities
+//
+//  Created by Thibaut Crenn on 05/06/12.
+//  Copyright 2012 __MyCompanyName__. All rights reserved.
+//
 
-@interface AirCapabilities : NSObject<MFMessageComposeViewControllerDelegate, SKStoreProductViewControllerDelegate> {
-    FREContext _context;
-    NSURL* _iTunesURL;
-    
+#import <Foundation/Foundation.h>
+#import <UIKit/UIApplication.h>
+#import "FlashRuntimeExtensions.h"
+#import <MessageUI/MFMessageComposeViewController.h>
+#import <Twitter/TWTweetComposeViewController.h>
+#import <StoreKit/StoreKit.h>
+
+@interface AirCapabilities : NSObject<MFMessageComposeViewControllerDelegate, SKStoreProductViewControllerDelegate>
+{
+    NSURL* iTunesURL;
 }
+
++(id) sharedInstance;
+
+@property (nonatomic, retain) NSURL* iTunesURL;
 
 @end
 
-void AirCapabilitiesContextInitializer(void* extData, const uint8_t* ctxType, FREContext ctx, uint32_t* numFunctionsToTest, const FRENamedFunction** functionsToSet);
+
+
+
+FREObject hasSMS(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject hasTwitter(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject sendSms(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject sendWithTwitter(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject redirectToRating(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject getDeviceModel(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject getMachineName(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject processReferralLink(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject redirectToPageId(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject redirectToTwitterAccount(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject canPostPictureOnTwitter(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject postPictureOnTwitter(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject openExternalApplication(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject getOSVersion(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject AirCapabilitiesCanOpenURL(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject AirCapabilitiesOpenURL(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject AirCapabilitiesSetLogging(FREContext context, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject traceLog(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject AirCapabilitiesOpenModalAppStore(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject requestAccessForMediaType(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject openApplicationSetting(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject openApplication(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject uniqueID(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject getAvailableDevices(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject setStatusBarHidden(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+FREObject setStatusBarStyle(FREContext, void* functionData, uint32_t argc, FREObject argv[]);
+
+
+void AirCapabilitiesContextInitializer(void* extData, const uint8_t* ctxType, FREContext ctx, 
+                                       uint32_t* numFunctionsToTest, const FRENamedFunction** functionsToSet);
+
 void AirCapabilitiesContextFinalizer(FREContext ctx);
-void AirCapabilitiesInitializer(void** extDataToSet, FREContextInitializer* ctxInitializerToSet, FREContextFinalizer* ctxFinalizerToSet);
+
+void AirCapabilitiesInitializer(void** extDataToSet, FREContextInitializer* ctxInitializerToSet, FREContextFinalizer* ctxFinalizerToSet );
 void AirCapabilitiesFinalizer(void *extData);

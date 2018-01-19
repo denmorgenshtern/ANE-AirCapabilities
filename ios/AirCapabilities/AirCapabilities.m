@@ -1,814 +1,1044 @@
-/*
- * Copyright 2017 FreshPlanet
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+//
+//  AirCapabilities.m
+//  AirCapabilities
+//
+//  Created by Thibaut Crenn on 05/06/12.
+//  Copyright 2012 __MyCompanyName__. All rights reserved.
+//
+
 #import "AirCapabilities.h"
-#import <mach/mach.h>
 #import <sys/utsname.h>
-#import <UIKit/UIApplication.h>
-#import <Twitter/TWTweetComposeViewController.h>
-#import <StoreKit/SKStoreReviewController.h>
+
+#import <AVFoundation/AVFoundation.h>
+#import <AssetsLibrary/AssetsLibrary.h>
+
+#import "DeviceUID.h"
+
+#define DEFINE_ANE_FUNCTION(fn) FREObject (fn)(FREContext context, void* functionData, uint32_t argc, FREObject argv[])
+
+#define SYSTEM_VERSION_EQUAL_TO(v)                  ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] == NSOrderedSame)
+#define SYSTEM_VERSION_GREATER_THAN(v)              ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] == NSOrderedDescending)
+#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v)  ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
+#define SYSTEM_VERSION_LESS_THAN(v)                 ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] == NSOrderedAscending)
+#define SYSTEM_VERSION_LESS_THAN_OR_EQUAL_TO(v)     ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedDescending)
+
+FREContext myAirCapaCtx = nil;
+bool doLogging = false;
 
 @implementation AirCapabilities
 
-BOOL doLogging = NO;
+@synthesize iTunesURL;
 
-- (id) initWithContext:(FREContext)extensionContext {
-    
-    if (self = [super init]) {
-        
-        _context = extensionContext;
-        
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(handleMemoryWarning:)
-                                                     name:UIApplicationDidReceiveMemoryWarningNotification
-                                                   object:nil];
++(id) sharedInstance {
+    static id sharedInstance = nil;
+    if (sharedInstance == nil) {
+        sharedInstance = [[self alloc] init];
     }
     
-    return self;
+    return sharedInstance;
 }
 
-- (void) sendLog:(NSString*)log {
-    [self sendEvent:@"log" level:log];
-}
-
-- (void) sendEvent:(NSString*)code {
-    [self sendEvent:code level:@""];
-}
-
-- (void) sendEvent:(NSString*)code level:(NSString*)level {
-    FREDispatchStatusEventAsync(_context, (const uint8_t*)[code UTF8String], (const uint8_t*)[level UTF8String]);
-}
-
-- (void) messageComposeViewController:(MFMessageComposeViewController*)controller didFinishWithResult:(MessageComposeResult)result {
-    
-    [self sendEvent:@"DISMISS" level:@"OK"];
+- (void)messageComposeViewController:(MFMessageComposeViewController *)controller didFinishWithResult:(MessageComposeResult)result
+{
+    if (myAirCapaCtx)
+    {
+        FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[@"DISMISS" UTF8String], (uint8_t*)[@"OK" UTF8String]);
+    }
     
     id delegate = [[UIApplication sharedApplication] delegate];
-    [[[delegate window] rootViewController] dismissViewControllerAnimated:NO completion:^{}];
+    [[[delegate window] rootViewController] dismissModalViewControllerAnimated:NO];
     
     [[NSNotificationCenter defaultCenter] postNotificationName:UIDeviceOrientationDidChangeNotification object:nil];
 }
 
-- (void) openReferralURL:(NSURL*)referralURL {
-    [[NSURLConnection alloc] initWithRequest:[NSURLRequest requestWithURL:referralURL] delegate:self startImmediately:YES];
+- (void)openReferralURL:(NSURL *)referralURL
+{
+    NSURLConnection *con = [[NSURLConnection alloc] initWithRequest:[NSURLRequest requestWithURL:referralURL] delegate:self startImmediately:YES];
+    [con release];
 }
 
-- (NSURLRequest*) connection:(NSURLConnection*)connection willSendRequest:(NSURLRequest*)request redirectResponse:(NSURLResponse*)response {
-    
-    _iTunesURL = [response URL];
-    
-    if ([_iTunesURL.host hasSuffix:@"itunes.apple.com"]) {
-        
+// Save the most recent URL in case multiple redirects occur
+// "iTunesURL" is an NSURL property in your class declaration
+- (NSURLRequest *)connection:(NSURLConnection *)connection willSendRequest:(NSURLRequest *)request redirectResponse:(NSURLResponse *)response
+{
+    self.iTunesURL = [response URL];
+    if( [self.iTunesURL.host hasSuffix:@"itunes.apple.com"])
+    {
         [connection cancel];
         [self connectionDidFinishLoading:connection];
         return nil;
     }
-    else {
+    else
+    {
         return request;
     }
 }
 
-- (void) connectionDidFinishLoading:(NSURLConnection*)connection {
-    [[UIApplication sharedApplication] openURL:_iTunesURL];
+// No more redirects; use the last URL saved
+- (void)connectionDidFinishLoading:(NSURLConnection *)connection
+{
+    [[UIApplication sharedApplication] openURL:self.iTunesURL];
 }
 
-- (void) openApplication:(NSArray*)schemes appStoreURL:(NSURL*)appStoreURL {
-    
-    BOOL canOpenApplication = NO;
-    
-    for (NSString* scheme in schemes) {
-        
+// Open an application (if installed on the device) or send the player to the appstore
+//
+// @param schemes : NSArray      - List of schemes (String) that the application accepts.  Examples : @"sms://", @"twit://".  You can find schemes in http://handleopenurl.com/
+// @param appStoreURL : NSURL    - (optional) Link to the AppStore page for the Application for the player to download. URL can be generated via Apple's linkmaker (itunes.apple.com/linkmaker?)
+- (void) openApplication:(NSArray*)schemes appStoreURL:(NSURL*)appStoreURL
+{
+    BOOL canOpenApplication;
+    for (NSString* scheme in schemes)
+    {
         canOpenApplication = [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:scheme]];
-        
-        if (canOpenApplication) {
-            
+        if (canOpenApplication)
+        {
             [[UIApplication sharedApplication] openURL:[NSURL URLWithString:scheme]];
             break;
         }
     }
         
-    if (!canOpenApplication) {
-        
+    if (!canOpenApplication)
+    {
         if (appStoreURL != nil)
+        {
             [[UIApplication sharedApplication] openURL:appStoreURL];
+        }
     }
 }
 
-- (void) productViewControllerDidFinish:(SKStoreProductViewController*)viewController {
+- (void)productViewControllerDidFinish:(SKStoreProductViewController *)viewController
+{
+    [[UIApplication sharedApplication].delegate.window.rootViewController dismissModalViewControllerAnimated:YES];
     
-    [[UIApplication sharedApplication].delegate.window.rootViewController dismissViewControllerAnimated:YES completion:^{}];
-    [self sendEvent:@"CLOSED_MODAL_APP_STORE"];
+    if (myAirCapaCtx)
+        FREDispatchStatusEventAsync(myAirCapaCtx, (const uint8_t*)"CLOSED_MODAL_APP_STORE", (const uint8_t*)"");
 }
 
 - (void) openModalAppStore:(NSString*)appStoreID {
-
-     SKStoreProductViewController* storeController = [[SKStoreProductViewController alloc] init];
-     storeController.delegate = self;
     
-     [[UIApplication sharedApplication].delegate.window.rootViewController presentViewController:storeController animated:YES completion:^{}];
-    
-     [storeController loadProductWithParameters:@{ SKStoreProductParameterITunesItemIdentifier: appStoreID }
-                                completionBlock:^(BOOL result, NSError *error) {
-                                    
-                                    if (!result) {
-                                        
-                                        [[UIApplication sharedApplication].delegate.window.rootViewController dismissViewControllerAnimated:YES completion:^{}];
-                                        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:[NSString stringWithFormat:@"http://itunes.apple.com/app/id%@", appStoreID]]];
-                                    }
-                                }];
-
-}
-
-- (void) handleMemoryWarning:(NSNotification*)notification {
-    
-    NSString* memUse = [NSString stringWithFormat:@"%f", [AirCapabilities currentMemUse]];
-    [self sendEvent:@"LOW_MEMORY_WARNING" level:memUse];
-}
-
-+ (double) currentMemUse {
-    
-    struct mach_task_basic_info info;
-    mach_msg_type_number_t size = MACH_TASK_BASIC_INFO_COUNT;
-    kern_return_t kerr = task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &size);
-    return (kerr == KERN_SUCCESS) ? info.resident_size : 0; // size in bytes
-}
-
-+ (double) currentVirtualMemUse {
-    
-    vm_statistics_data_t vmStats;
-    mach_msg_type_number_t infoCount = HOST_VM_INFO_COUNT;
-    kern_return_t kernReturn = host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&vmStats, &infoCount);
-   
-    if (kernReturn != KERN_SUCCESS)
-        return LONG_MAX;
-   
-    return vm_page_size * vmStats.free_count;
+    if (!NSClassFromString(@"SKStoreProductViewController")) // if feature is not available
+        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:[NSString stringWithFormat:@"http://itunes.apple.com/app/id%@", appStoreID]]];
+    else
+    {
+        SKStoreProductViewController* storeController = [[SKStoreProductViewController alloc] init];
+        storeController.delegate = self;
+        
+        [[UIApplication sharedApplication].delegate.window.rootViewController presentViewController:storeController animated:YES completion:nil];
+        
+        [storeController loadProductWithParameters:@{ SKStoreProductParameterITunesItemIdentifier: appStoreID }
+                                   completionBlock:^(BOOL result, NSError *error) {
+                                       
+                                       if (!result) {
+                                           
+                                           [[UIApplication sharedApplication].delegate.window.rootViewController dismissModalViewControllerAnimated:YES];
+                                           [[UIApplication sharedApplication] openURL:[NSURL URLWithString:[NSString stringWithFormat:@"http://itunes.apple.com/app/id%@", appStoreID]]];
+                                       }
+                                   }];
+    }
 }
 
 @end
 
-AirCapabilities* GetAirCapabilitiesContextNativeData(FREContext context) {
-    
-    CFTypeRef controller;
-    FREGetContextNativeData(context, (void**)&controller);
-    return (__bridge AirCapabilities*)controller;
-}
 
-DEFINE_ANE_FUNCTION(hasSMS) {
-    
+DEFINE_ANE_FUNCTION(hasSMS)
+{
     BOOL value = [MFMessageComposeViewController canSendText];
-    return AirCapabilities_FPANE_BOOLToFREObject(value);
+    FREObject retBool = nil;
+    FRENewObjectFromBool(value, &retBool);
+    return retBool;
 }
 
-DEFINE_ANE_FUNCTION(hasTwitter) {
+
+DEFINE_ANE_FUNCTION(hasTwitter)
+{
+    BOOL value = false;
+    value =[TWTweetComposeViewController canSendTweet];
     
-    BOOL value = [TWTweetComposeViewController canSendTweet];
-    
-    if (!value) {
-        
+    if (!value)
+    {
         NSArray* schemeArray = [NSArray arrayWithObjects:@"twitter:///post?message=Hello", @"twitterrific://", @"twit://", @"tweetbot://", @"twinkle://", nil];
         
         for (NSString* scheme in schemeArray) {
-            
             value = [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:scheme]];
-            
             if (value)
+            {
                 break;
+            }
         }
+
     }
-    
-    return AirCapabilities_FPANE_BOOLToFREObject(value);
+    FREObject retBool = nil;
+    FRENewObjectFromBool(value, &retBool);
+    return retBool;
 }
 
-DEFINE_ANE_FUNCTION(sendWithSms) {
+DEFINE_ANE_FUNCTION(sendSms)
+{
+    uint32_t string_length;
+    const uint8_t *utf8_message;
+    NSString* message;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_message) == FRE_OK)
+    {
+        message = [NSString stringWithUTF8String:(char*) utf8_message];
+    }
+
+    const uint8_t *utf8_recipient;
+    NSString* recipientString = nil;
+    if (FREGetObjectAsUTF8(argv[1], &string_length, &utf8_recipient) == FRE_OK)
+    {
+        recipientString = [NSString stringWithUTF8String:(char*) utf8_recipient];
+    }
+
     
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
     
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* message = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSString* recipientString = AirCapabilities_FPANE_FREObjectToNSString(argv[1]);
+    if (message != nil)
+    {
+        MFMessageComposeViewController *viewController = [[MFMessageComposeViewController alloc] init];
+        viewController.body = message;
         
-        if (message != nil) {
-            
-            MFMessageComposeViewController *viewController = [[MFMessageComposeViewController alloc] init];
-            viewController.body = message;
-            
-            if (recipientString != nil)
-                viewController.recipients = [NSArray arrayWithObject:recipientString];
-            
-            viewController.messageComposeDelegate = controller;
-            
-            id delegate = [[UIApplication sharedApplication] delegate];
-            [[[delegate window] rootViewController] presentViewController:viewController animated:YES completion:^{}];
+        if (recipientString != nil)
+        {
+            viewController.recipients = [NSArray arrayWithObject:recipientString];
         }
+        
+        viewController.messageComposeDelegate = [AirCapabilities sharedInstance];
+        id delegate = [[UIApplication sharedApplication] delegate];
+        [[[delegate window] rootViewController] presentModalViewController:viewController animated:YES];
     }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to send SMS : " stringByAppendingString:exception.reason]];
-    }
+    
     return nil;
 }
 
-DEFINE_ANE_FUNCTION(sendWithTwitter) {
+DEFINE_ANE_FUNCTION(sendWithTwitter)
+{
+    uint32_t string_length;
+    const uint8_t *utf8_message;
+    NSString* message;
+    NSString* urlEncodedMessage;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_message) == FRE_OK)
+    {
+        message = [NSString stringWithUTF8String:(char*) utf8_message];
+        urlEncodedMessage = (NSString *)CFURLCreateStringByAddingPercentEscapes( NULL,	 (CFStringRef)message,	 NULL,	 (CFStringRef)@"!’\"();:@&=+$,/?%#[]% ", kCFStringEncodingISOLatin1);
+    }
     
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* message = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSString* urlEncodedMessage = (NSString*)CFURLCreateStringByAddingPercentEscapes(NULL, (CFStringRef)message, NULL, (CFStringRef)@"!’\"();:@&=+$,/?%#[]% ", kCFStringEncodingISOLatin1);;
+    if (message != nil)
+    {
         
-        if (message != nil) {
+        if ([TWTweetComposeViewController canSendTweet])
+        {
+            TWTweetComposeViewController *tweetViewController = [[TWTweetComposeViewController alloc] init];
             
-            if ([TWTweetComposeViewController canSendTweet]) {
+            // Set the initial tweet text. See the framework for additional properties that can be set.
+            [tweetViewController setInitialText:message];            
+            
+            // Create the completion handler block.
+            [tweetViewController setCompletionHandler:^(TWTweetComposeViewControllerResult result) {
+                NSString *output;
                 
-                TWTweetComposeViewController *tweetViewController = [[TWTweetComposeViewController alloc] init];
+                switch (result) {
+                    case TWTweetComposeViewControllerResultCancelled:
+                        // The cancel button was tapped.
+                        output = @"Tweet cancelled.";
+                        break;
+                    case TWTweetComposeViewControllerResultDone:
+                        // The tweet was sent.
+                        output = @"Tweet done.";
+                        break;
+                    default:
+                        break;
+                }
                 
-                // Set the initial tweet text. See the framework for additional properties that can be set.
-                [tweetViewController setInitialText:message];
-                
-                // Create the completion handler block.
-                [tweetViewController setCompletionHandler:^(TWTweetComposeViewControllerResult result) {
-                    NSString *output;
-                    
-                    switch (result) {
-                        case TWTweetComposeViewControllerResultCancelled:
-                            // The cancel button was tapped.
-                            output = @"Tweet cancelled.";
-                            break;
-                        case TWTweetComposeViewControllerResultDone:
-                            // The tweet was sent.
-                            output = @"Tweet done.";
-                            break;
-                        default:
-                            break;
-                    }
-                    
-                    id delegate = [[UIApplication sharedApplication] delegate];
-                    // Dismiss the tweet composition view controller.
-                    [[[delegate window] rootViewController] dismissViewControllerAnimated:YES completion:^{}];
-                }];
-                
-                // Present the tweet composition view controller modally.
                 id delegate = [[UIApplication sharedApplication] delegate];
-                [[[delegate window] rootViewController] presentViewController:tweetViewController animated:YES completion:^{}];
+                // Dismiss the tweet composition view controller.
+                [[[delegate window] rootViewController] dismissModalViewControllerAnimated:YES];
+            }];
+            
+            // Present the tweet composition view controller modally.
+            id delegate = [[UIApplication sharedApplication] delegate];
+            [[[delegate window] rootViewController] presentModalViewController:tweetViewController animated:YES];
 
+        } else
+        {
+//            NSArray* schemeArray = [NSArray arrayWithObjects:@"twitter://", @"twitterrific://", @"twit://", @"tweetbot://", @"twinkle://", nil];
+//            for (NSString* scheme in schemeArray) {
+//                NSString *fullScheme = [NSString stringWithFormat:@"%@/post?message=%@", scheme, urlEncodedMessage];
+//                NSURL *url = [NSURL URLWithString:fullScheme];
+//                if ([[UIApplication sharedApplication] canOpenURL:url])
+//                {
+//                    [[UIApplication sharedApplication] openURL:url];
+//                    break;
+//                }
+//            }
+            // Build our schemes
+            NSArray* schemes = [NSArray arrayWithObjects:@"twitter://", @"twitterrific://", @"twit://", @"tweetbot://", @"twinkle://", nil];
+            NSMutableArray* fullSchemes = [[NSMutableArray alloc] init];
+            for (NSString *scheme in schemes) {
+                [fullSchemes addObject:[NSString stringWithFormat:@"%@/post?message=%@", scheme, urlEncodedMessage]];
             }
-            else {
-                
-                // Build our schemes
-                NSArray* schemes = [NSArray arrayWithObjects:@"twitter://", @"twitterrific://", @"twit://", @"tweetbot://", @"twinkle://", nil];
-                NSMutableArray* fullSchemes = [[NSMutableArray alloc] init];
-                for (NSString *scheme in schemes)
-                    [fullSchemes addObject:[NSString stringWithFormat:@"%@/post?message=%@", scheme, urlEncodedMessage]];
-
-                [controller openApplication:fullSchemes appStoreURL:nil];
-            }
+            [[AirCapabilities sharedInstance] openApplication:fullSchemes appStoreURL:nil];
         }
-    }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured send Twitter message : " stringByAppendingString:exception.reason]];
     }
     
     return nil;
 }
 
-DEFINE_ANE_FUNCTION(redirectToRating) {
+DEFINE_ANE_FUNCTION(redirectToRating)
+{
+    uint32_t string_length;
+    const uint8_t *utf8_appId;
     
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* appId = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSString* url = nil;
-        
-        
+    NSString* url;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_appId) == FRE_OK)
+    {
         if ([[[UIDevice currentDevice] systemVersion] compare:@"7.0" options:NSNumericSearch] != NSOrderedAscending)
-            url = [NSString stringWithFormat: @"itms-apps://itunes.apple.com/app/id%@", appId]; //@"518042655"
-        else
-            url = [NSString stringWithFormat: @"itms-apps://ax.itunes.apple.com/WebObjects/MZStore.woa/wa/viewContentsUserReviews?type=Purple+Software&id=%@", appId]; //@"518042655"
-        
-        
-        if (url != nil) {
-            [controller openApplication:[NSArray arrayWithObject:url] appStoreURL:nil];
+        {
+            url = [NSString stringWithFormat: @"itms-apps://itunes.apple.com/app/id%@", [NSString stringWithUTF8String:(char*) utf8_appId]]; //@"518042655"
+        } else
+        {
+            url = [NSString stringWithFormat: @"itms-apps://ax.itunes.apple.com/WebObjects/MZStore.woa/wa/viewContentsUserReviews?type=Purple+Software&id=%@", [NSString stringWithUTF8String:(char*) utf8_appId]]; //@"518042655"
+
         }
     }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to redirect to rating : " stringByAppendingString:exception.reason]];
+
+    if (url != nil)
+    {
+//        NSURL *urlScheme = [NSURL URLWithString:url];
+//        if ([[UIApplication sharedApplication] canOpenURL:urlScheme])
+//        {
+//            [[UIApplication sharedApplication] openURL:urlScheme];
+//        }
+        [[AirCapabilities sharedInstance] openApplication:[NSArray arrayWithObject:url] appStoreURL:nil];
     }
+    
     return nil;
 }
 
 
-DEFINE_ANE_FUNCTION(getDeviceModel) {
+DEFINE_ANE_FUNCTION(getDeviceModel)
+{
     
-    NSString* model = [[UIDevice currentDevice] model];
-    FREObject retStr = AirCapabilities_FPANE_NSStringToFREObject(model);
+    NSString *model = [[UIDevice currentDevice] model];
+    
+    const char *str = [model UTF8String];
+    FREObject retStr;
+	FRENewObjectFromUTF8(strlen(str)+1, (const uint8_t*)str, &retStr);
 
     return retStr;
 }
 
 DEFINE_ANE_FUNCTION(getMachineName) {
-    
 	struct utsname systemInfo;
 	uname(&systemInfo);
-	return AirCapabilities_FPANE_NSStringToFREObject([NSString stringWithUTF8String:systemInfo.machine]);
+	const char *str = systemInfo.machine;
+	FREObject retStr;
+	FRENewObjectFromUTF8(strlen(str)+1, (const uint8_t*)str, &retStr);
+	return retStr;
 }
 
-DEFINE_ANE_FUNCTION(processReferralLink) {
+DEFINE_ANE_FUNCTION(processReferralLink)
+{
     
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
+    uint32_t string_length;
+    const uint8_t *utf8_itunesUrl;
     
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* url = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSURL* nsUrl = [NSURL URLWithString:url];
-        [controller openReferralURL:nsUrl];
+    NSString* url;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_itunesUrl) == FRE_OK)
+    {
+        url = [NSString stringWithUTF8String:(char*) utf8_itunesUrl];
     }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to process referral link : " stringByAppendingString:exception.reason]];
-    }
+    
+    NSURL* nsUrl = [NSURL URLWithString:url];
+    [[AirCapabilities sharedInstance] openReferralURL:nsUrl];
+    
     return NULL;
 }
 
 
-DEFINE_ANE_FUNCTION(redirectToPageId) {
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
+DEFINE_ANE_FUNCTION(redirectToPageId)
+{
     
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
+    uint32_t string_length;
+    const uint8_t *utf8_pageId;
     
-    @try {
-        NSString* pageId = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSString* schemeString = [NSString stringWithFormat:@"fb://profile/%@", pageId];
-        NSURL* schemeUrl = [NSURL URLWithString:schemeString];
-        
-        if (![[UIApplication sharedApplication] canOpenURL:schemeUrl])
-            schemeUrl = [NSURL URLWithString:[NSString stringWithFormat:@"http://www.facebook.com/%@", pageId]];
-        
-        [[UIApplication sharedApplication] openURL:schemeUrl];
+    NSString* pageId;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_pageId) == FRE_OK)
+    {
+        pageId = [NSString stringWithUTF8String:(char*) utf8_pageId];
     }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to redirect to page id : " stringByAppendingString:exception.reason]];
+
+    NSString* schemeString = [NSString stringWithFormat:@"fb://profile/%@", pageId];
+    NSURL* schemeUrl = [NSURL URLWithString:schemeString];
+    
+    if(doLogging)
+        NSLog(@"scheme: %@", schemeString);
+    
+    if (![[UIApplication sharedApplication] canOpenURL:schemeUrl])
+    {
+        if(doLogging)
+            NSLog(@"%@", @"Cannot log");
+
+        schemeUrl = [NSURL URLWithString:[NSString stringWithFormat:@"http://www.facebook.com/%@", pageId]];
     }
+    
+    [[UIApplication sharedApplication] openURL:schemeUrl];
+    
     return NULL;
 }
 
-DEFINE_ANE_FUNCTION(redirectToTwitterAccount) {
-    
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* pageId = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSString* schemeString = [NSString stringWithFormat:@"twitter://user?screen_name=%@", pageId];
-        NSURL* schemeUrl = [NSURL URLWithString:schemeString];
 
-        if (![[UIApplication sharedApplication] canOpenURL:schemeUrl])
-            schemeUrl = [NSURL URLWithString:[NSString stringWithFormat:@"http://www.twitter.com/%@", pageId]];
-        
-        [[UIApplication sharedApplication] openURL:schemeUrl];
+DEFINE_ANE_FUNCTION(redirectToTwitterAccount)
+{
+    
+    uint32_t string_length;
+    const uint8_t *utf8_pageId;
+    
+    NSString* pageId;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_pageId) == FRE_OK)
+    {
+        pageId = [NSString stringWithUTF8String:(char*) utf8_pageId];
     }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to redirect Twitter account : " stringByAppendingString:exception.reason]];
+    
+    NSString* schemeString = [NSString stringWithFormat:@"twitter://user?screen_name=%@", pageId];
+    NSURL* schemeUrl = [NSURL URLWithString:schemeString];
+    if(doLogging)
+        NSLog(@"scheme: %@", schemeString);
+
+    if (![[UIApplication sharedApplication] canOpenURL:schemeUrl])
+    {
+        if(doLogging)
+            NSLog(@"%@", @"Cannot log");
+
+        schemeUrl = [NSURL URLWithString:[NSString stringWithFormat:@"http://www.twitter.com/%@", pageId]];
     }
+    
+    [[UIApplication sharedApplication] openURL:schemeUrl];
+    
     return NULL;
 }
 
-DEFINE_ANE_FUNCTION(canPostPictureOnTwitter) {
-    return AirCapabilities_FPANE_BOOLToFREObject([TWTweetComposeViewController canSendTweet]);
+
+DEFINE_ANE_FUNCTION(canPostPictureOnTwitter)
+{
+    BOOL value = false;
+    value = [TWTweetComposeViewController canSendTweet];
+    FREObject retBool = nil;
+    FRENewObjectFromBool(value, &retBool);
+    return retBool;
 }
 
-DEFINE_ANE_FUNCTION(getOSVersion) {
-    
+
+DEFINE_ANE_FUNCTION(getOSVersion)
+{
     NSString *systemVersion = [[UIDevice currentDevice] systemVersion];
-    return AirCapabilities_FPANE_NSStringToFREObject(systemVersion);
+    const uint8_t *utf8_message = (const uint8_t *)  [systemVersion UTF8String];
+    uint32_t string_length = [systemVersion length];
+    FREObject retString = nil;
+    FRENewObjectFromUTF8(string_length, utf8_message, &retString);
+    return retString;
 }
 
-DEFINE_ANE_FUNCTION(postPictureOnTwitter) {
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* message = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        FREBitmapData bitmapData;
-        UIImage *rewardImage = nil;
-        if (FREAcquireBitmapData(argv[1], &bitmapData) == FRE_OK) {
-            
-            // make data provider from buffer
-            CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, bitmapData.bits32, (bitmapData.width * bitmapData.height * 4), NULL);
-            
-            // set up for CGImage creation
-            int                     bitsPerComponent    = 8;
-            int                     bitsPerPixel        = 32;
-            int                     bytesPerRow         = 4 * bitmapData.width;
-            CGColorSpaceRef         colorSpaceRef       = CGColorSpaceCreateDeviceRGB();
-            CGBitmapInfo            bitmapInfo;
-            
-            if (bitmapData.hasAlpha) {
-                
-                if (bitmapData.isPremultiplied)
-                    bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst;
-                else
-                    bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaFirst;
-            }
-            else {
-                bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst;
-            }
-            
-            CGColorRenderingIntent  renderingIntent     = kCGRenderingIntentDefault;
-            CGImageRef              imageRef            = CGImageCreate(bitmapData.width, bitmapData.height, bitsPerComponent, bitsPerPixel, bytesPerRow, colorSpaceRef, bitmapInfo, provider, NULL, NO, renderingIntent);
-            
-            // make UIImage from CGImage
-            rewardImage = [UIImage imageWithCGImage:imageRef];
-            
-            FREReleaseBitmapData(argv[1]);
-        }
-        else {
-            return nil;
-        }
-        
-        TWTweetComposeViewController *tweetViewController = [[TWTweetComposeViewController alloc] init];
-        
-        // Set the initial tweet text. See the framework for additional properties that can be set.
-        [tweetViewController setInitialText:message];
-        [tweetViewController addImage:rewardImage];
-        
-        // Create the completion handler block.
-        [tweetViewController setCompletionHandler:^(TWTweetComposeViewControllerResult result) {
-            NSString *output;
-            
-            switch (result) {
-                case TWTweetComposeViewControllerResultCancelled:
-                    // The cancel button was tapped.
-                    output = @"Tweet cancelled.";
-                    break;
-                case TWTweetComposeViewControllerResultDone:
-                    // The tweet was sent.
-                    output = @"Tweet done.";
-                    break;
-                default:
-                    break;
-            }
-            
-            id delegate = [[UIApplication sharedApplication] delegate];
-            // Dismiss the tweet composition view controller.
-            [[[delegate window] rootViewController] dismissViewControllerAnimated:YES completion:^{}];
-        }];
-        
-        // Present the tweet composition view controller modally.
-        id delegate = [[UIApplication sharedApplication] delegate];
-        [[[delegate window] rootViewController] presentViewController:tweetViewController animated:YES completion:^{}];
-    }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to post picture on Twitter : " stringByAppendingString:exception.reason]];
-    }
-    return nil;
-}
 
-DEFINE_ANE_FUNCTION(openExternalApplication) {
+DEFINE_ANE_FUNCTION(postPictureOnTwitter)
+{
     
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
+    uint32_t string_length;
+    const uint8_t *utf8_message;
     
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        uint32_t arr_len; // array length
-        
-        FREObject arr = argv[0];
-        FREGetArrayLength(arr, &arr_len);
-        NSMutableArray* schemes = [[NSMutableArray alloc] init];
-        for (int32_t i = 0; i < arr_len; i++) {
-            
-            // Get element at current index
-            FREObject element;
-            FREGetArrayElementAt(arr, i, &element);
-            
-            // Convert to NSString and add it to schemes
-            NSString* elem = AirCapabilities_FPANE_FREObjectToNSString(element);//[NSString stringWithUTF8String:(char*)elementStr];
-            [schemes addObject:elem];
-        }
-        
-        NSString *appStoreString = AirCapabilities_FPANE_FREObjectToNSString(argv[1]);
-        NSURL* appStoreURL = [NSURL URLWithString:appStoreString];
-        
-        bool canOpenApplication = false;
-        
-        for (NSString* scheme in schemes)
-            canOpenApplication = canOpenApplication || [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:scheme]];
-        
-        [controller sendEvent:@"OPEN_URL" level:canOpenApplication ? @"APP": @"STORE"];
-        [controller openApplication:schemes appStoreURL:appStoreURL];
+    NSString* message;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_message) == FRE_OK)
+    {
+        message = [NSString stringWithUTF8String:(char*) utf8_message];
     }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to open external application : " stringByAppendingString:exception.reason]];
-    }
-    return nil;
-}
 
-DEFINE_ANE_FUNCTION(AirCapabilitiesCanOpenURL) {
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString *urlString = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSURL *url = [NSURL URLWithString:urlString];
+    FREBitmapData bitmapData;
+    UIImage *rewardImage;
+    if (FREAcquireBitmapData(argv[1], &bitmapData) == FRE_OK)
+    {
         
-        BOOL canOpenURL = url ? [[UIApplication sharedApplication] canOpenURL:url] : NO;
-        return AirCapabilities_FPANE_BOOLToFREObject(canOpenURL);
-    }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to check can open URL : " stringByAppendingString:exception.reason]];
-    }
-    
-    return nil;
-}
-
-DEFINE_ANE_FUNCTION(AirCapabilitiesOpenURL) {
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString *urlString = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        NSURL *url = [NSURL URLWithString:urlString];
-        BOOL canOpenURL = url ? [[UIApplication sharedApplication] canOpenURL:url] : NO;
+        // make data provider from buffer
+        CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, bitmapData.bits32, (bitmapData.width * bitmapData.height * 4), NULL);
         
-        if (canOpenURL)
-            [[UIApplication sharedApplication] openURL:url];
-    }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to open URL : " stringByAppendingString:exception.reason]];
-    }
-    return nil;
-}
-
-DEFINE_ANE_FUNCTION(AirCapabilitiesSetLogging) {
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        doLogging = AirCapabilities_FPANE_FREObjectToBool(argv[0]);
-    }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to setLogging : " stringByAppendingString:exception.reason]];
-    }
-    return nil;
-}
-
-DEFINE_ANE_FUNCTION(traceLog) {
-    
-    if(!doLogging)
-        return nil;
-    
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSInteger logLevel = AirCapabilities_FPANE_FREObjectToInt(argv[0]);
-        NSString *tag = AirCapabilities_FPANE_FREObjectToNSString(argv[1]);
-        NSString *msg = AirCapabilities_FPANE_FREObjectToNSString(argv[2]);
+        // set up for CGImage creation
+        int                     bitsPerComponent    = 8;
+        int                     bitsPerPixel        = 32;
+        int                     bytesPerRow         = 4 * bitmapData.width;
+        CGColorSpaceRef         colorSpaceRef       = CGColorSpaceCreateDeviceRGB();
+        CGBitmapInfo            bitmapInfo;
         
-        NSString *formatString = nil;
-        switch (logLevel) {
-            case 2:
-                formatString = @"[Verbose][%s]: %s";
-                break;
-            case 3:
-                formatString = @"[Debug][%s]: %s";
-                break;
-            case 4:
-                formatString = @"[Info][%s]: %s";
-                break;
-            case 5:
-                formatString = @"[Warn][%s]: %s";
-                break;
-            case 6:
-                formatString = @"[Error][%s]: %s";
-                break;
-        }
-        
-        NSLog(formatString, tag, msg);
-    }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to traceLog : " stringByAppendingString:exception.reason]];
-    }
-    return nil;
-}
-
-DEFINE_ANE_FUNCTION(openModalAppStore) {
-    
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* appStoreID = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        [controller openModalAppStore:appStoreID];
-    }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to open modal AppStore : " stringByAppendingString:exception.reason]];
-    }
-    return nil;
-}
-
-DEFINE_ANE_FUNCTION(hasInstagramEnabled) {
-    
-    BOOL value = [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"instagram://app"]];
-    return AirCapabilities_FPANE_BOOLToFREObject(value);
-}
-
-DEFINE_ANE_FUNCTION(postPictureOnInstagram) {
-    
-    AirCapabilities* controller = GetAirCapabilitiesContextNativeData(context);
-    
-    if (!controller)
-        return AirCapabilities_FPANE_CreateError(@"context's AirCapabilities is null", 0);
-    
-    @try {
-        NSString* message = AirCapabilities_FPANE_FREObjectToNSString(argv[0]);
-        
-        FREBitmapData bitmapData;
-        UIImage *rewardImage = nil;
-        if (FREAcquireBitmapData(argv[1], &bitmapData) == FRE_OK) {
-            
-            // make data provider from buffer
-            CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, bitmapData.bits32, (bitmapData.width * bitmapData.height * 4), NULL);
-            
-            // set up for CGImage creation
-            int                     bitsPerComponent    = 8;
-            int                     bitsPerPixel        = 32;
-            int                     bytesPerRow         = 4 * bitmapData.width;
-            CGColorSpaceRef         colorSpaceRef       = CGColorSpaceCreateDeviceRGB();
-            CGBitmapInfo            bitmapInfo;
-            
-            if (bitmapData.hasAlpha) {
-                
-                if (bitmapData.isPremultiplied)
-                    bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst;
-                else
-                    bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaFirst;
-            }
-            else {
-                bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst;
-            }
-            
-            CGColorRenderingIntent  renderingIntent     = kCGRenderingIntentDefault;
-            CGImageRef              imageRef            = CGImageCreate(bitmapData.width, bitmapData.height, bitsPerComponent, bitsPerPixel, bytesPerRow, colorSpaceRef, bitmapInfo, provider, NULL, NO, renderingIntent);
-            
-            // make UIImage from CGImage
-            rewardImage = [UIImage imageWithCGImage:imageRef];
-            
-            FREReleaseBitmapData(argv[1]);
-        }
-        
-        
-        NSInteger xPosition = AirCapabilities_FPANE_FREObjectToInt(argv[2]);
-        NSInteger yPosition = AirCapabilities_FPANE_FREObjectToInt(argv[3]);
-        NSInteger width = AirCapabilities_FPANE_FREObjectToInt(argv[4]);
-        NSInteger height = AirCapabilities_FPANE_FREObjectToInt(argv[5]);
-        // saving it to disk
-        NSData *imageData= UIImageJPEGRepresentation(rewardImage,0.0);
-        NSString *imagePath = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex:0] stringByAppendingPathComponent:@"/insta.igo"];
-        [imageData writeToFile:imagePath atomically:YES];
-
-        
-        // creating the popover
-        UIDocumentInteractionController *interactionController = [UIDocumentInteractionController interactionControllerWithURL: [NSURL fileURLWithPath:imagePath]];
-        
-        // setting specific param
-        interactionController.UTI = @"com.instagram.exclusivegram";
-        if (message != nil)
+        if( bitmapData.hasAlpha )
         {
-            interactionController.annotation = [NSDictionary dictionaryWithObject:message forKey:@"InstagramCaption"]; // todo pass message
+            if( bitmapData.isPremultiplied )
+                bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst;
+            else
+                bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaFirst;
+        }
+        else
+        {
+            bitmapInfo = kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst;
         }
         
-        // Present the tweet composition view controller modally.
+        CGColorRenderingIntent  renderingIntent     = kCGRenderingIntentDefault;
+        CGImageRef              imageRef            = CGImageCreate(bitmapData.width, bitmapData.height, bitsPerComponent, bitsPerPixel, bytesPerRow, colorSpaceRef, bitmapInfo, provider, NULL, NO, renderingIntent);
+        
+        // make UIImage from CGImage
+        rewardImage = [UIImage imageWithCGImage:imageRef];
+        
+        FREReleaseBitmapData( argv[1] );
+    }
+
+    
+    
+    TWTweetComposeViewController *tweetViewController = [[TWTweetComposeViewController alloc] init];
+    
+    // Set the initial tweet text. See the framework for additional properties that can be set.
+    [tweetViewController setInitialText:message];
+    [tweetViewController addImage:rewardImage];
+    
+    
+    // Create the completion handler block.
+    [tweetViewController setCompletionHandler:^(TWTweetComposeViewControllerResult result) {
+        NSString *output;
+        
+        switch (result) {
+            case TWTweetComposeViewControllerResultCancelled:
+                // The cancel button was tapped.
+                output = @"Tweet cancelled.";
+                break;
+            case TWTweetComposeViewControllerResultDone:
+                // The tweet was sent.
+                output = @"Tweet done.";
+                break;
+            default:
+                break;
+        }
+        
         id delegate = [[UIApplication sharedApplication] delegate];
-        
-        interactionController.delegate = delegate;
-        
-        UIView *rootView = [[[[UIApplication sharedApplication] keyWindow] rootViewController] view];
+        // Dismiss the tweet composition view controller.
+        [[[delegate window] rootViewController] dismissModalViewControllerAnimated:YES];
+    }];
+    
+    // Present the tweet composition view controller modally.
+    id delegate = [[UIApplication sharedApplication] delegate];
+    [[[delegate window] rootViewController] presentModalViewController:tweetViewController animated:YES];
 
-        [interactionController presentOpenInMenuFromRect:CGRectMake(xPosition, yPosition, width, height) inView:rootView animated:YES];
+    return nil;
+    
+}
+
+
+DEFINE_ANE_FUNCTION(openExternalApplication)
+{
+    uint32_t string_length;
+    uint32_t arr_len; // array length
+
+    const uint8_t *utf8_appStoreURL;
+    
+    FREObject arr = argv[0];
+    FREGetArrayLength(arr, &arr_len);
+    NSMutableArray* schemes = [[NSMutableArray alloc] init];
+    for (int32_t i = 0; i < arr_len; i++)
+    {
+        // Get element at current index
+        FREObject element;
+        FREGetArrayElementAt(arr, i, &element);
+        
+        // check if element is valid
+        const uint8_t *elementStr;
+        if (FREGetObjectAsUTF8(element, &string_length, &elementStr) != FRE_OK)
+        {
+            continue;
+        }
+        
+        // Convert to NSString and add it to schemes
+        NSString* elem = [NSString stringWithUTF8String:(char*)elementStr];
+        [schemes addObject:elem];
     }
-    @catch (NSException *exception) {
-        [controller sendLog:[@"Exception occured while trying to post picture on Instagram : " stringByAppendingString:exception.reason]];
+    
+    NSURL* appStoreURL = nil;
+    if (FREGetObjectAsUTF8(argv[1], &string_length, &utf8_appStoreURL) == FRE_OK)
+    {
+        appStoreURL = [NSURL URLWithString:[NSString stringWithUTF8String:(char*) utf8_appStoreURL]];
     }
+
+    
+    bool canOpenApplication = false;
+    
+    for (NSString* scheme in schemes)
+    {
+        canOpenApplication = canOpenApplication || [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:scheme]];
+    }
+
+    
+    if (myAirCapaCtx)
+    {
+        FREDispatchStatusEventAsync(context, (uint8_t*)[@"OPEN_URL" UTF8String], canOpenApplication ? (uint8_t*)[@"APP" UTF8String] : (uint8_t*)[@"STORE" UTF8String]);
+    }
+    
+    
+    [[AirCapabilities sharedInstance] openApplication:schemes appStoreURL:appStoreURL];
+    
     return nil;
 }
 
-DEFINE_ANE_FUNCTION(getCurrentMem) {
+DEFINE_ANE_FUNCTION(AirCapabilitiesCanOpenURL)
+{
+    uint32_t stringLength;
     
-    double bytes = [AirCapabilities currentMemUse];
-    return AirCapabilities_FPANE_DoubleToFREObject(bytes);
-}
-
-DEFINE_ANE_FUNCTION(getCurrentVirtualMem) {
+    const uint8_t *urlString;
+    NSURL *url;
+    if (FREGetObjectAsUTF8(argv[0], &stringLength, &urlString) == FRE_OK)
+    {
+        url = [NSURL URLWithString:[NSString stringWithUTF8String:(const char *)urlString]];
+    }
     
-    double bytes = [AirCapabilities currentVirtualMemUse];
-    return AirCapabilities_FPANE_DoubleToFREObject(bytes);
+    BOOL canOpenURL = url ? [[UIApplication sharedApplication] canOpenURL:url] : NO;
+    FREObject result;
+    FRENewObjectFromBool(canOpenURL, &result);
+    return result;
 }
 
-DEFINE_ANE_FUNCTION(canRequestReview) {
-
-    BOOL value = NO;
-
-    if ([NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){10,3,0}] && [SKStoreReviewController class])
-        value = YES;
-
-    return AirCapabilities_FPANE_BOOLToFREObject(value);
-}
-
-DEFINE_ANE_FUNCTION(requestReview) {
-
-    [SKStoreReviewController requestReview];
+DEFINE_ANE_FUNCTION(AirCapabilitiesOpenURL)
+{
+    uint32_t stringLength;
+    
+    const uint8_t *urlString;
+    NSURL *url;
+    if (FREGetObjectAsUTF8(argv[0], &stringLength, &urlString) == FRE_OK)
+    {
+        url = [NSURL URLWithString:[NSString stringWithUTF8String:(const char *)urlString]];
+    }
+    
+    BOOL canOpenURL = url ? [[UIApplication sharedApplication] canOpenURL:url] : NO;
+    
+    if (canOpenURL)
+    {
+        [[UIApplication sharedApplication] openURL:url];
+    }
+    
     return nil;
 }
 
-void AirCapabilitiesContextInitializer(void* extData, const uint8_t* ctxType, FREContext ctx, uint32_t* numFunctionsToTest, const FRENamedFunction** functionsToSet) {
+DEFINE_ANE_FUNCTION(AirCapabilitiesSetLogging)
+{
+    unsigned int loggingValue = 0;
+    if (FREGetObjectAsBool(argv[0], &loggingValue) == FRE_OK)
+        doLogging = (loggingValue != 0);
     
-    AirCapabilities* controller = [[AirCapabilities alloc] initWithContext:ctx];
-    FRESetContextNativeData(ctx, (void*)CFBridgingRetain(controller));
-    
-    static FRENamedFunction functions[] = {
-        MAP_FUNCTION(hasSMS, NULL),
-        MAP_FUNCTION(hasTwitter, NULL),
-        MAP_FUNCTION(sendWithSms, NULL),
-        MAP_FUNCTION(sendWithTwitter, NULL),
-        MAP_FUNCTION(redirectToRating, NULL),
-        MAP_FUNCTION(getDeviceModel, NULL),
-        MAP_FUNCTION(getMachineName, NULL),
-        MAP_FUNCTION(processReferralLink, NULL),
-        MAP_FUNCTION(redirectToPageId, NULL),
-        MAP_FUNCTION(redirectToTwitterAccount, NULL),
-        MAP_FUNCTION(canPostPictureOnTwitter, NULL),
-        MAP_FUNCTION(postPictureOnTwitter, NULL),
-        MAP_FUNCTION(openExternalApplication, NULL),
-        MAP_FUNCTION(getOSVersion, NULL),
-        { (const uint8_t*)"canOpenURL", NULL, &AirCapabilitiesCanOpenURL }, // these method names have conflicts with other libs
-        { (const uint8_t*)"openURL", NULL, &AirCapabilitiesOpenURL },
-        { (const uint8_t*)"setLogging", NULL, &AirCapabilitiesSetLogging },
-        MAP_FUNCTION(traceLog, NULL),
-        MAP_FUNCTION(openModalAppStore, NULL),
-        MAP_FUNCTION(hasInstagramEnabled, NULL),
-        MAP_FUNCTION(postPictureOnInstagram, NULL),
-        MAP_FUNCTION(getCurrentMem, NULL),
-        MAP_FUNCTION(getCurrentVirtualMem, NULL),
-        MAP_FUNCTION(canRequestReview, NULL),
-        MAP_FUNCTION(requestReview, NULL)
-    };
-    
-    *numFunctionsToTest = sizeof(functions) / sizeof(FRENamedFunction);
-    *functionsToSet = functions;
+    return nil;
 }
 
-void AirCapabilitiesContextFinalizer(FREContext ctx) {
+DEFINE_ANE_FUNCTION(traceLog)
+{
+    int32_t logLevel;
+    if(FREGetObjectAsInt32(argv[0], &logLevel) != FRE_OK) {
+        NSLog(@"[AirCapabilities] Error trying to call traceLog from flash");
+        return nil;
+    }
     
-    CFTypeRef controller;
-    FREGetContextNativeData(ctx, (void**)&controller);
-    CFBridgingRelease(controller);
+    uint32_t strlen;
+    const uint8_t *tag;
+    const uint8_t *msg;
+
+    if((FREGetObjectAsUTF8(argv[1], &strlen, &tag) != FRE_OK) || (FREGetObjectAsUTF8(argv[2], &strlen, &msg) != FRE_OK)) {
+        NSLog(@"[AirCapabilities] Error trying to call traceLog from flash");
+        return nil;
+    }
+    
+    NSString *formatString;
+
+    switch (logLevel) {
+        case 2:
+            formatString = @"[Verbose][%s]: %s";
+            break;
+        case 3:
+            formatString = @"[Debug][%s]: %s";
+            break;
+        case 4:
+            formatString = @"[Info][%s]: %s";
+            break;
+        case 5:
+            formatString = @"[Warn][%s]: %s";
+            break;
+        case 6:
+            formatString = @"[Error][%s]: %s";
+            break;
+    }
+    
+    NSLog(formatString, tag, msg);
+    return nil;
 }
 
-void AirCapabilitiesInitializer(void** extDataToSet, FREContextInitializer* ctxInitializerToSet, FREContextFinalizer* ctxFinalizerToSet) {
+DEFINE_ANE_FUNCTION(AirCapabilitiesOpenModalAppStore)
+{
+    uint32_t stringLength;
+    
+    const uint8_t *appStoreIdString;
+    NSString* appStoreID;
+    
+    if (FREGetObjectAsUTF8(argv[0], &stringLength, &appStoreIdString) == FRE_OK)
+        appStoreID = [NSString stringWithUTF8String:(const char *)appStoreIdString];
+    
+    [[AirCapabilities sharedInstance] openModalAppStore:appStoreID];
+    
+    return nil;
+}
+
+DEFINE_ANE_FUNCTION(requestAccessForMediaType) {
+    
+    uint32_t string_length;
+    const uint8_t *utf8_mediaType;
+    NSString* mediaType;
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_mediaType) == FRE_OK)
+    {
+        mediaType = [NSString stringWithUTF8String:(char*) utf8_mediaType];
+    }
+    
+    uint32_t requestAccess;
+    FREGetObjectAsBool(argv[1], &requestAccess);
+    
+    NSLog(@"requestAccessForMediaType %@ requestAccess %d", mediaType, requestAccess);
+    
+    if([mediaType isEqual: @"ALAssetsLibrary"]) {
+        ALAuthorizationStatus status = [ALAssetsLibrary authorizationStatus];
+        
+        if (status == ALAuthorizationStatusAuthorized)
+        {
+            NSLog(@"AuthorizationStatusAuthorized to %@", mediaType);
+            FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusAuthorized" UTF8String]);
+        }
+        else if(status == ALAuthorizationStatusRestricted)
+        {
+            NSLog(@"AuthorizationStatusRestricted to %@", mediaType);
+            FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusRestricted" UTF8String]);
+        }
+        else if(status == ALAuthorizationStatusDenied)
+        {
+            NSLog(@"AuthorizationStatusDenied to %@", mediaType);
+            FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusDenied" UTF8String]);
+        }
+        else if(status == ALAuthorizationStatusNotDetermined)
+        {
+            if(requestAccess) {
+                ALAssetsLibrary *lib = [[ALAssetsLibrary alloc] init];
+                
+                [lib enumerateGroupsWithTypes:ALAssetsGroupSavedPhotos usingBlock:^(ALAssetsGroup *group, BOOL *stop) {
+                    NSLog(@"AuthorizationStatusAuthorized to %@", mediaType);
+                    FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusAuthorized" UTF8String]);
+                } failureBlock:^(NSError *error) {
+                    if (error.code == ALAssetsLibraryAccessUserDeniedError) {
+                        NSLog(@"AuthorizationStatusDenied to %@", mediaType);
+                        FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusDenied" UTF8String]);
+                    }else{
+                        NSLog(@"AuthorizationStatusDenied to %@", mediaType);
+                        FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusDenied" UTF8String]);
+                    }
+                }];
+            }
+            else
+            {
+                NSLog(@"AuthorizationStatusNotDetermined to %@", mediaType);
+                FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusNotDetermined" UTF8String]);
+            }
+        }
+        
+        return NULL;
+    }
+    
+    if([mediaType  isEqual: @"vide"])
+        mediaType = AVMediaTypeVideo;
+    else if([mediaType  isEqual: @"soun"])
+        mediaType = AVMediaTypeAudio;
+    else
+        return NULL;
+    
+    AVAuthorizationStatus authStatus = [AVCaptureDevice authorizationStatusForMediaType:mediaType];
+    
+    if(authStatus == AVAuthorizationStatusAuthorized)
+    {
+        NSLog(@"AuthorizationStatusAuthorized to %@", mediaType);
+        FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusAuthorized" UTF8String]);
+    }
+    else if(authStatus == AVAuthorizationStatusNotDetermined)
+    {
+        if(requestAccess){
+            [AVCaptureDevice requestAccessForMediaType:mediaType completionHandler:^(BOOL granted)
+             {
+                 if(granted)
+                 {
+                     NSLog(@"AuthorizationStatusAuthorized to %@", mediaType);
+                     FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusAuthorized" UTF8String]);
+                 }
+                 else
+                 {
+                     NSLog(@"AuthorizationStatusDenied to %@", mediaType);
+                     FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusDenied" UTF8String]);
+                 }
+             }];
+        }else{
+            NSLog(@"AuthorizationStatusNotDetermined to %@", mediaType);
+            FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusNotDetermined" UTF8String]);
+        }
+    }
+    else if (authStatus == AVAuthorizationStatusRestricted)
+    {
+        NSLog(@"AuthorizationStatusRestricted to %@", mediaType);
+        FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusRestricted" UTF8String]);
+    }
+    else if (authStatus == AVAuthorizationStatusDenied)
+    {
+        NSLog(@"AuthorizationStatusDenied to %@", mediaType);
+        FREDispatchStatusEventAsync(myAirCapaCtx, (uint8_t*)[mediaType UTF8String], (uint8_t*)[@"AuthorizationStatusDenied" UTF8String]);
+    }
+    
+    return NULL;
+}
+
+DEFINE_ANE_FUNCTION(openApplicationSetting) {
+    
+    if(SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"8.0"))
+        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:UIApplicationOpenSettingsURLString]];
+    
+    return NULL;
+}
+
+DEFINE_ANE_FUNCTION(openApplication) {
+    
+    uint32_t string_length;
+    const uint8_t *utf8_pageId;
+    
+    NSString* appID;
+    
+    if (FREGetObjectAsUTF8(argv[0], &string_length, &utf8_pageId) == FRE_OK)
+        appID = [NSString stringWithUTF8String:(char*) utf8_pageId];
+    else
+        return NULL;
+    
+    BOOL canOpenURL = [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:appID]];
+    
+    if(canOpenURL)
+        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:appID]];
+    
+    return NULL;
+}
+
+DEFINE_ANE_FUNCTION(uniqueID) {
+    
+    NSString *uid = [DeviceUID uid];
+    
+    NSLog(@"uniqueID %@", uid);
+    
+    const char *str = [uid UTF8String];
+    FREObject retStr;
+    FRENewObjectFromUTF8(strlen(str)+1, (const uint8_t*)str, &retStr);
+    
+    return retStr;
+}
+
+DEFINE_ANE_FUNCTION(getAvailableDevices) {
+    
+    NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
+    
+    uint32_t i = 0;
+    FREObject cameras = NULL;
+    
+    FRENewObject((const uint8_t*)"Vector.<com.freshplanet.ane.AirCapabilities.CaptureDevice>", 0, NULL, &cameras, nil);
+    FRESetArrayLength(cameras, (int)devices.count);
+    
+    for (AVCaptureDevice *device in devices) {
+        
+        FREObject camera;
+        // create an instance of Object and save it to FREObject position
+        FRENewObject((const uint8_t*)"com.freshplanet.ane.AirCapabilities.CaptureDevice", 0, NULL, &camera, NULL);
+        
+        FREObject id;
+        FREObject orientation;
+        FREObject facing;
+        
+        FRENewObjectFromInt32(i, &id);
+        FRENewObjectFromInt32(90, &orientation);
+        
+        if ([device position] == AVCaptureDevicePositionBack) {
+            FRENewObjectFromInt32(0, &facing);
+        } else {
+            FRENewObjectFromInt32(1, &facing);
+        }
+        
+        // fill properties of FREObject position
+        FRESetObjectProperty(camera, (const uint8_t*)"id", id, NULL);
+        FRESetObjectProperty(camera, (const uint8_t*)"orientation", orientation, NULL);
+        FRESetObjectProperty(camera, (const uint8_t*)"facing", facing, NULL);
+        
+        // add position to the array
+        FRESetArrayElementAt(cameras, i, camera);
+        
+        i++;
+    }
+    
+    return cameras;
+}
+
+DEFINE_ANE_FUNCTION(setStatusBarHidden) {
+    
+    uint32_t hide;
+    FREGetObjectAsBool(argv[0], &hide);
+    
+    [[UIApplication sharedApplication] setStatusBarHidden:hide withAnimation:UIStatusBarAnimationFade];
+    
+    return NULL;
+}
+
+DEFINE_ANE_FUNCTION(setStatusBarStyle) {
+    
+    uint32_t light;
+    FREGetObjectAsBool(argv[0], &light);
+    
+    if(light) {
+       [UIApplication sharedApplication].statusBarStyle = UIStatusBarStyleLightContent; 
+    } else {
+        [UIApplication sharedApplication].statusBarStyle = UIBarStyleBlack;
+    }
+    
+    return NULL;
+}
+
+// AirBgMusicContextInitializer()
+//
+// The context initializer is called when the runtime creates the extension context instance.
+void AirCapabilitiesContextInitializer(void* extData, const uint8_t* ctxType, FREContext ctx, 
+                                  uint32_t* numFunctionsToTest, const FRENamedFunction** functionsToSet) 
+{    
+    // Register the links btwn AS3 and ObjC. (dont forget to modify the nbFuntionsToLink integer if you are adding/removing functions)
+    NSInteger nbFuntionsToLink = 25;
+    *numFunctionsToTest = (int)nbFuntionsToLink;
+    
+    FRENamedFunction* func = (FRENamedFunction*) malloc(sizeof(FRENamedFunction) * nbFuntionsToLink);
+    func[0].name = (const uint8_t*) "hasSMS";
+    func[0].functionData = NULL;
+    func[0].function = &hasSMS;
+    
+    func[1].name = (const uint8_t*) "hasTwitter";
+    func[1].functionData = NULL;
+    func[1].function = &hasTwitter;
+
+    func[2].name = (const uint8_t*) "sendWithSms";
+    func[2].functionData = NULL;
+    func[2].function = &sendSms;
+
+    func[3].name = (const uint8_t*) "sendWithTwitter";
+    func[3].functionData = NULL;
+    func[3].function = &sendWithTwitter;
+
+    func[4].name = (const uint8_t*) "redirectToRating";
+    func[4].functionData = NULL;
+    func[4].function = &redirectToRating;
+
+    func[5].name = (const uint8_t*) "getDeviceModel";
+    func[5].functionData = NULL;
+    func[5].function = &getDeviceModel;
+	
+	func[6].name = (const uint8_t*) "getMachineName";
+    func[6].functionData = NULL;
+    func[6].function = &getMachineName;
+
+    func[7].name = (const uint8_t*) "processReferralLink";
+    func[7].functionData = NULL;
+    func[7].function = &processReferralLink;
+	
+    func[8].name = (const uint8_t*) "redirectToPageId";
+    func[8].functionData = NULL;
+    func[8].function = &redirectToPageId;
+    
+    func[9].name = (const uint8_t*) "redirectToTwitterAccount";
+    func[9].functionData = NULL;
+    func[9].function = &redirectToTwitterAccount;
+
+    func[10].name = (const uint8_t*) "canPostPictureOnTwitter";
+    func[10].functionData = NULL;
+    func[10].function = &canPostPictureOnTwitter;
+
+    func[11].name = (const uint8_t*) "postPictureOnTwitter";
+    func[11].functionData = NULL;
+    func[11].function = &postPictureOnTwitter;
+    
+    func[12].name = (const uint8_t*) "openExternalApplication";
+    func[12].functionData = NULL;
+    func[12].function = &openExternalApplication;
+
+    func[13].name = (const uint8_t*) "getOSVersion";
+    func[13].functionData = NULL;
+    func[13].function = &getOSVersion;
+    
+    func[14].name = (const uint8_t*) "canOpenURL";
+    func[14].functionData = NULL;
+    func[14].function = &AirCapabilitiesCanOpenURL;
+    
+    func[15].name = (const uint8_t*) "openURL";
+    func[15].functionData = NULL;
+    func[15].function = &AirCapabilitiesOpenURL;
+    
+    func[16].name = (const uint8_t*) "setLogging";
+    func[16].functionData = NULL;
+    func[16].function = &AirCapabilitiesSetLogging;
+    
+    func[17].name = (const uint8_t*) "traceLog";
+    func[17].functionData = NULL;
+    func[17].function = &traceLog;
+    
+    func[18].name = (const uint8_t*) "openModalAppStore";
+    func[18].functionData = NULL;
+    func[18].function = &AirCapabilitiesOpenModalAppStore;
+    
+    func[19].name = (const uint8_t*) "requestAccessForMediaType";
+    func[19].functionData = NULL;
+    func[19].function = &requestAccessForMediaType;
+    
+    func[20].name = (const uint8_t*) "openApplicationSetting";
+    func[20].functionData = NULL;
+    func[20].function = &openApplicationSetting;
+    
+    func[21].name = (const uint8_t*) "uniqueID";
+    func[21].functionData = NULL;
+    func[21].function = &uniqueID;
+    
+    func[22].name = (const uint8_t*) "getAvailableDevices";
+    func[22].functionData = NULL;
+    func[22].function = &getAvailableDevices;
+    
+    func[23].name = (const uint8_t*) "setStatusBarHidden";
+    func[23].functionData = NULL;
+    func[23].function = &setStatusBarHidden;
+    
+    func[24].name = (const uint8_t*) "setStatusBarStyle";
+    func[24].functionData = NULL;
+    func[24].function = &setStatusBarStyle;
+    
+    func[25].name = (const uint8_t*) "openApplication";
+    func[25].functionData = NULL;
+    func[25].function = &openApplication;
+    
+    *functionsToSet = func;
+    
+    myAirCapaCtx = ctx;
+}
+
+// AirBgMusicContextFinalizer()
+//
+// Set when the context extension is created.
+void AirCapabilitiesContextFinalizer(FREContext ctx) {}
+
+
+
+// AirBgMusicInitializer()
+//
+// The extension initializer is called the first time the ActionScript side of the extension
+// calls ExtensionContext.createExtensionContext() for any context.
+
+void AirCapabilitiesInitializer(void** extDataToSet, FREContextInitializer* ctxInitializerToSet, FREContextFinalizer* ctxFinalizerToSet ) 
+{
     
     *extDataToSet = NULL;
     *ctxInitializerToSet = &AirCapabilitiesContextInitializer; 
     *ctxFinalizerToSet = &AirCapabilitiesContextFinalizer;
 }
 
-void AirCapabilitiesFinalizer(void *extData) {
-
-}
+void AirCapabilitiesFinalizer(void *extData) { }

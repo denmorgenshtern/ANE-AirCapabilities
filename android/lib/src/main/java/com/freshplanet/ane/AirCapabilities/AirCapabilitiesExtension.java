@@ -14,10 +14,9 @@
  */
 package com.freshplanet.ane.AirCapabilities;
 
+import android.util.Log;
 import com.adobe.fre.FREContext;
 import com.adobe.fre.FREExtension;
-
-import android.util.Log;
 
 public class AirCapabilitiesExtension implements FREExtension {
 
@@ -25,7 +24,8 @@ public class AirCapabilitiesExtension implements FREExtension {
 	
 	public static FREContext context;
 	public static boolean doLogging = false;
-	
+	public static String referrer = "";
+
 	/**
 	 * Create the context (AS to Java).
 	 */

@@ -3,7 +3,7 @@
 
     <!-- Config -->
     <property file="build.config"/>
-
+    
     <!-- Load ant-contrib -->
     <taskdef resource="net/sf/antcontrib/antcontrib.properties">
         <classpath>
@@ -72,16 +72,20 @@
 
         <!-- make the build directory -->
         <mkdir dir="temp/android"/>
-      
+
+        <exec executable="/usr/libexec/java_home" outputproperty="java.home">
+            <!-- <arg line="-v 1.8" /> -->
+        </exec>
+
         <!-- clean the build -->
-        <exec executable="../android/gradlew.bat" dir="../android">
+        <exec executable="./gradlew" dir="../android">
             <env key="JAVA_HOME" path="${java.home}"/>
             <env key="ANDROID_HOME" path="${android.sdk.home}"/>
             <arg line="clean"/>
         </exec>
 
         <!-- compile the java code -->
-        <exec executable="../android/gradlew.bat" dir="../android">
+        <exec executable="./gradlew" dir="../android">
             <env key="JAVA_HOME" path="${java.home}"/>
             <env key="ANDROID_HOME" path="${android.sdk.home}"/>
             <arg line=":lib:assembleRelease"/>

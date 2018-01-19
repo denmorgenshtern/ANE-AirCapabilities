@@ -14,32 +14,13 @@
  */
 package com.freshplanet.ane.AirCapabilities;
 
-import java.util.HashMap;
-import java.util.Map;
-
 import android.util.Log;
-
 import com.adobe.fre.FREContext;
 import com.adobe.fre.FREFunction;
-import com.adobe.fre.FREObject;
-import com.freshplanet.ane.AirCapabilities.functions.CanOpenURLFunction;
-import com.freshplanet.ane.AirCapabilities.functions.GetCurrentMemFunction;
-import com.freshplanet.ane.AirCapabilities.functions.GetDeviceModelFunction;
-import com.freshplanet.ane.AirCapabilities.functions.GetOSVersionFunction;
-import com.freshplanet.ane.AirCapabilities.functions.HasInstagramFunction;
-import com.freshplanet.ane.AirCapabilities.functions.HasSMSFunction;
-import com.freshplanet.ane.AirCapabilities.functions.HasTwitterFunction;
-import com.freshplanet.ane.AirCapabilities.functions.LogFunction;
-import com.freshplanet.ane.AirCapabilities.functions.OpenURLFunction;
-import com.freshplanet.ane.AirCapabilities.functions.PostPictureOnInstagramFunction;
-import com.freshplanet.ane.AirCapabilities.functions.PostPictureOnTwitterFunction;
-import com.freshplanet.ane.AirCapabilities.functions.ProcessReferralLinkFunction;
-import com.freshplanet.ane.AirCapabilities.functions.RedirectToPageIdFunction;
-import com.freshplanet.ane.AirCapabilities.functions.RedirectToRatingFunction;
-import com.freshplanet.ane.AirCapabilities.functions.RedirectToTwitterAccountFunction;
-import com.freshplanet.ane.AirCapabilities.functions.SendWithSMSFunction;
-import com.freshplanet.ane.AirCapabilities.functions.SendWithTwitterFunction;
-import com.freshplanet.ane.AirCapabilities.functions.SetLoggingFunction;
+import com.freshplanet.ane.AirCapabilities.functions.*;
+
+import java.util.HashMap;
+import java.util.Map;
 
 public class AirCapabilitiesExtensionContext extends FREContext {
 
@@ -86,11 +67,20 @@ public class AirCapabilitiesExtensionContext extends FREContext {
 		functionMap.put("openURL", new OpenURLFunction());
 		functionMap.put("getOSVersion", new GetOSVersionFunction());
 		functionMap.put("setLogging", new SetLoggingFunction());
-		functionMap.put("traceLog", new LogFunction());
+		functionMap.put("traceLog", new LogFunction());		
 		functionMap.put("hasInstagramEnabled", new HasInstagramFunction());
         functionMap.put("postPictureOnInstagram", new PostPictureOnInstagramFunction());
         functionMap.put("getCurrentMem", new GetCurrentMemFunction());
-		return functionMap;	
+
+		functionMap.put("requestAccessForMediaType", new RequestAccessForMediaTypeFunction());
+		functionMap.put("openApplicationSetting", new OpenApplicationSettingFunction());
+        functionMap.put("getReferrer", new GetReferrerFunction());
+        functionMap.put("uniqueID", new UniqueIDFunction());
+        functionMap.put("getAvailableDevices", new GetAvailableDevicesFunction());
+        functionMap.put("openApplication", new OpenApplicationFunction());
+        functionMap.put("getInstallerPackageName", new GetInstallerPackageName());
+
+		return functionMap;
 	}
 
 }
